@@ -7,7 +7,38 @@ PythonAnywhere's **Beginner/free** account can host this app with a persistent
 SQLite database. No paid disk or paid web service is selected by this setup.
 No hosting account has been created or website deployed by publishing these files.
 
+## Let the assistant deploy to your free account
+
+Create the free account first. Share its username, then generate an account API
+token under **Account → API token**. Enter it securely as `QUOTE_HOST_API_KEY`
+in the cloud environment settings; do not paste it into chat. Set
+`QUOTE_HOST_USERNAME` to the account username. `QUOTE_HOST_API_ORIGIN` defaults
+to `https://www.pythonanywhere.com`; EU accounts use `https://eu.pythonanywhere.com`.
+This account-management credential is not needed by the app itself and is never
+uploaded with it.
+
+The tested helper `deploy/pythonanywhere_api.py` can create the standard free
+WSGI site using the official API, without a console or paid worker. It uploads
+only the app source and a pure-Python dependency ZIP built from the installed,
+pinned dependencies. It refuses to overwrite an unrecognized existing site or
+directory, never changes account plans, and verifies the public health/sign-in
+endpoints after reload. Revoke the account API token after deployment if you
+do not need further remote updates.
+
+```sh
+.venv/bin/python deploy/pythonanywhere_api.py --prepare
+# Only after secure account credentials are configured:
+.venv/bin/python deploy/pythonanywhere_api.py --deploy
+```
+
+The first command prepares files locally and creates no hosting resources.
+Public verification can require allowing the exact assigned website hostname
+in this cloud environment's network settings. A successful file upload alone
+does not establish that the website is publicly working.
+
 ## Create the free website
+
+For manual deployment without giving the assistant account access:
 
 1. Create a free account at https://www.pythonanywhere.com/registration/register/beginner/.
    Choose the free Beginner account. Open a Bash console from its dashboard.

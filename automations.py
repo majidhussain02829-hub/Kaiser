@@ -473,7 +473,7 @@ def register_automations(app, db, user, data, text, throttle):
         owner = user()['id']
         data()
         throttle('automation-run', 30, 3600)
-        return jsonify(process_automations(app, user_id=owner))
+        return jsonify(process_automations(app, user_id=owner, time_budget=45, max_jobs=10))
 
     app.extensions['automations'] = dict(queue_due=queue_due, dispatch=dispatch, settings=settings)
 
