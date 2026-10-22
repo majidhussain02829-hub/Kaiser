@@ -1,0 +1,25 @@
+# A Render Blueprint for the complete app, including durable SQLite storage.
+# Review Render's current pricing before creating this paid service.
+services:
+  - type: web
+    name: quote-desk
+    runtime: python
+    plan: starter
+    numInstances: 1
+    buildCommand: pip install -r requirements.txt
+    startCommand: python app.py --host 0.0.0.0 --port "$PORT"
+    healthCheckPath: /api/health
+    autoDeployTrigger: "off"
+    disk:
+      name: quote-desk-data
+      mountPath: /var/data
+      sizeGB: 1
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.12.14"
+      - key: QUOTE_DESK_DATA
+        value: /var/data/quote-desk
+      - key: COOKIE_SECURE
+        value: "1"
+      - key: QUOTE_AI_MODEL
+        value: gpt-4.1-mini
