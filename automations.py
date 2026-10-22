@@ -5,17 +5,19 @@ recipient delivery. Failed or ambiguous sends are never automatically retried.
 """
 import base64
 import json
+import math
 import os
 import re
 import secrets
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from flask import abort, jsonify
+from flask import abort, g, has_app_context, jsonify
 
 DEFAULTS = dict(timezone='Australia/Darwin', reminder_hour=9,
                 owner_email_enabled=False, customer_email_enabled=False,
@@ -27,6 +29,25 @@ class DeliveryError(Exception):
     def __init__(self, message, uncertain=False):
         super().__init__(message)
         self.uncertain = uncertain
+
+
+class AutomationBudgetExpired(Exception):
+    """A bounded pass stopped before contacting another provider."""
+
+
+def _remaining_time():
+    deadline = getattr(g, 'automation_deadline', None) if has_app_context() else None
+    return None if deadline is None else max(0, deadline - time.monotonic())
+
+
+def _has_time():
+    remaining = _remaining_time()
+    return remaining is None or remaining > 0
+
+
+def _jobs_available():
+    remaining = getattr(g, 'automation_jobs_remaining', None) if has_app_context() else None
+    return remaining is None or remaining > 0
 
 
 def provider_status(app):
@@ -43,8 +64,12 @@ def _post(url, payload, headers, form=False):
     body = urlencode(payload).encode() if form else json.dumps(payload).encode()
     headers = dict(headers, **{'Content-Type': 'application/x-www-form-urlencoded' if form else 'application/json'})
     req = Request(url, data=body, headers=headers, method='POST')
+    remaining = _remaining_time()
+    if remaining is not None and remaining <= 0:
+        raise AutomationBudgetExpired()
+    timeout = 25 if remaining is None else min(25, remaining)
     try:
-        with urlopen(req, timeout=25) as response:
+        with urlopen(req, timeout=timeout) as response:
             return json.load(response)
     except HTTPError as exc:
         # Provider response bodies may contain credentials or customer data; never log them.
@@ -106,6 +131,8 @@ def _draft(app, entry, business, channel, purpose, enabled, owner_email=''):
     context = {k: entry[k] for k in ('name', 'service', 'job', 'status', 'amount')}
     context.update(business=business, purpose=purpose)
     try:
+        if not _has_time():
+            raise AutomationBudgetExpired()
         callback = app.config.get('QUOTE_AI_DRAFT')
         if callback:
             result = callback(context, channel)
@@ -127,6 +154,8 @@ def _draft(app, entry, business, channel, purpose, enabled, owner_email=''):
         footer = f' {business}. Reply STOP to opt out.' if channel == 'sms' else f'\n\n{business}\nTo stop follow-up messages, reply to {owner_email or 'this email'}.'
         body = result['body'].strip()[:limit-len(footer)] + footer
         return dict(subject=subject.strip() if channel == 'email' else '', body=body, source='ai')
+    except AutomationBudgetExpired:
+        raise
     except Exception:
         template['warning'] = 'AI drafting is unavailable. An editable template was used instead.'
         return template
@@ -205,16 +234,22 @@ def register_automations(app, db, user, data, text, throttle):
         row = db().execute('SELECT * FROM messages WHERE user_id=? AND dedupe=?', (owner, dedupe)).fetchone()
         return dict(row), bool(cursor.rowcount)
 
-    def queue_due(now, owner=None):
+    def queue_due(now, owner=None, limit=None):
         queued = 0
-        users = db().execute('SELECT * FROM users' + (' WHERE id=?' if owner is not None else ''), (owner,) if owner is not None else ()).fetchall()
+        if not _has_time() or limit == 0:
+            return queued
+        users = db().execute('SELECT * FROM users' + (' WHERE id=?' if owner is not None else ''), (owner,) if owner is not None else ())
         for account in users:
+            if not _has_time():
+                return queued
             options = settings(account['id'])
             local = now.astimezone(ZoneInfo(options['timezone']))
             if local.hour < options['reminder_hour']:
                 continue
-            entries = db().execute("SELECT * FROM enquiries WHERE user_id=? AND status IN ('New','Contacted','Quoted') AND followup<>'' AND followup<=?", (account['id'], local.date().isoformat())).fetchall()
+            entries = db().execute("SELECT * FROM enquiries WHERE user_id=? AND status IN ('New','Contacted','Quoted') AND followup<>'' AND followup<=?", (account['id'], local.date().isoformat()))
             for row in entries:
+                if not _has_time():
+                    return queued
                 entry = dict(row)
                 candidates = []
                 if options['owner_email_enabled']:
@@ -224,6 +259,8 @@ def register_automations(app, db, user, data, text, throttle):
                         if options[f'customer_{channel}_enabled'] and entry.get(f'{channel}_consent') and _destination(entry, channel):
                             candidates.append((channel, 'customer_followup', _destination(entry, channel)))
                 for channel, kind, recipient in candidates:
+                    if not _has_time() or (limit is not None and queued >= limit):
+                        return queued
                     dedupe = f"{kind}:{entry['id']}:{entry['followup']}:{channel}"
                     # Check before AI calls as deduplication must also prevent repeated billable drafting.
                     if db().execute('SELECT 1 FROM messages WHERE user_id=? AND dedupe=?', (account['id'], dedupe)).fetchone():
@@ -232,7 +269,12 @@ def register_automations(app, db, user, data, text, throttle):
                         draft = dict(subject=f"Quote follow-up: {entry['name']}"[:150],
                                      body=f"{account['business']}: follow up with {entry['name']} about {entry['service']}.\nDue: {entry['followup']}\nStatus: {entry['status']}\nQuote: AUD ${entry['amount'] or 'not recorded'}\nOpen Quote Desk to review the enquiry and contact the customer.", source='template')
                     else:
-                        draft = _draft(app, entry, account['business'], channel, 'followup', options['ai_enabled'], account['email'])
+                        try:
+                            draft = _draft(app, entry, account['business'], channel, 'followup', options['ai_enabled'], account['email'])
+                        except AutomationBudgetExpired:
+                            return queued
+                    # Retain a completed draft even when its AI call used the
+                    # remaining time; the next tick can send it without redrafting.
                     _, inserted = queue(account['id'], entry, channel, kind, recipient, draft, dedupe, now)
                     queued += int(inserted)
         return queued
@@ -262,18 +304,26 @@ def register_automations(app, db, user, data, text, throttle):
 
     def dispatch(now, owner=None):
         counts = dict(accepted=0, sent=0, blocked=0, failed=0, cancelled=0, unknown=0)
+        if not _has_time() or not _jobs_available():
+            return counts
         # A crashed process may have sent already. Preserve uncertainty instead of sending twice.
         stale = (now - timedelta(minutes=10)).isoformat()
         with db():
             db().execute("UPDATE messages SET status='unknown',error='A previous send was interrupted. Check the provider dashboard before resending.',updated_at=? WHERE status='sending' AND updated_at<?" + (' AND user_id=?' if owner is not None else ''), (now.isoformat(), stale, owner) if owner is not None else (now.isoformat(), stale))
         rows = db().execute("SELECT * FROM messages WHERE status='queued'" + (' AND user_id=?' if owner is not None else '') + ' ORDER BY created_at LIMIT 100', (owner,) if owner is not None else ()).fetchall()
         for row in rows:
+            if not _has_time() or not _jobs_available():
+                break
             message = dict(row)
             # Claim before any network call; only one worker can change queued -> sending.
             with db():
                 changed = db().execute("UPDATE messages SET status='sending',updated_at=? WHERE id=? AND status='queued'", (now.isoformat(), message['id'])).rowcount
             if not changed:
                 continue
+            if not _has_time():
+                with db():
+                    db().execute("UPDATE messages SET status='queued',updated_at=? WHERE id=? AND status='sending'", (now.isoformat(), message['id']))
+                break
             reason = invalid_reason(message)
             provider_id = ''
             if reason:
@@ -282,13 +332,23 @@ def register_automations(app, db, user, data, text, throttle):
                 status, error = 'blocked', f"Connect the {message['channel']} provider in environment settings, then retry this message."
             else:
                 try:
+                    if not _has_time():
+                        raise AutomationBudgetExpired()
                     account = db().execute('SELECT email FROM users WHERE id=?', (message['user_id'],)).fetchone()
                     message['reply_to'] = account['email']
                     callback = app.config.get('QUOTE_' + message['channel'].upper() + '_SEND')
+                    if not _has_time():
+                        raise AutomationBudgetExpired()
                     provider_id = (callback or (send_email if message['channel'] == 'email' else send_sms))(message)
                     if not isinstance(provider_id, str) or not provider_id:
                         raise DeliveryError('Provider acceptance could not be confirmed.', uncertain=True)
                     status, error = 'accepted', ''
+                except AutomationBudgetExpired:
+                    # No provider request started, so this is safe to leave for
+                    # a later tick rather than reporting an ambiguous send.
+                    with db():
+                        db().execute("UPDATE messages SET status='queued',updated_at=? WHERE id=? AND status='sending'", (now.isoformat(), message['id']))
+                    break
                 except DeliveryError as exc:
                     status, error = ('unknown' if exc.uncertain else 'failed'), str(exc)
                 except Exception:
@@ -296,6 +356,8 @@ def register_automations(app, db, user, data, text, throttle):
             with db():
                 db().execute('UPDATE messages SET status=?,error=?,provider_id=?,updated_at=? WHERE id=?', (status, error, provider_id[:200], now.isoformat(), message['id']))
             counts[status] += 1
+            if getattr(g, 'automation_jobs_remaining', None) is not None:
+                g.automation_jobs_remaining -= 1
             if status == 'accepted':
                 counts['sent'] += 1
         return counts
@@ -416,14 +478,34 @@ def register_automations(app, db, user, data, text, throttle):
     app.extensions['automations'] = dict(queue_due=queue_due, dispatch=dispatch, settings=settings)
 
 
-def process_automations(app, user_id=None, now=None, dispatch=True):
-    """Perform one deterministic scheduler pass; persistent dedupe survives restart."""
+def process_automations(app, user_id=None, now=None, dispatch=True,
+                        time_budget=None, max_jobs=None):
+    """Perform a pass, optionally bounded for a short-lived WSGI scheduler call.
+
+    Bounds are cooperative: provider socket timeouts use the time remaining,
+    but they cannot forcibly interrupt an already-running callback or streaming
+    response. Completed attempts are persisted even if they exhaust the budget.
+    """
+    if time_budget is not None and (isinstance(time_budget, bool) or not isinstance(time_budget, (int, float)) or not math.isfinite(time_budget) or time_budget < 0):
+        raise ValueError('time_budget must be a finite non-negative number.')
+    if max_jobs is not None and (isinstance(max_jobs, bool) or not isinstance(max_jobs, int) or max_jobs < 0):
+        raise ValueError('max_jobs must be a non-negative integer.')
     with app.app_context():
+        g.automation_deadline = None if time_budget is None else time.monotonic() + time_budget
+        g.automation_jobs_remaining = max_jobs
         stamp = _now(app, now)
         hooks = app.extensions['automations']
-        result = dict(queued=hooks['queue_due'](stamp, user_id), accepted=0, sent=0, blocked=0, failed=0, cancelled=0, unknown=0)
-        if dispatch:
+        result = dict(queued=0, accepted=0, sent=0, blocked=0, failed=0, cancelled=0, unknown=0)
+        bounded = time_budget is not None or max_jobs is not None
+        if bounded and dispatch:
+            # Existing jobs, including reviewed manual messages and previously
+            # generated AI drafts, must not starve behind more billable drafting.
             result.update(hooks['dispatch'](stamp, user_id))
+        if _has_time() and _jobs_available():
+            result['queued'] = hooks['queue_due'](stamp, user_id, limit=g.automation_jobs_remaining)
+        if dispatch and _has_time() and _jobs_available():
+            for key, count in hooks['dispatch'](stamp, user_id).items():
+                result[key] += count
         return result
 
 

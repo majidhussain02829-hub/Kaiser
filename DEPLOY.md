@@ -1,53 +1,129 @@
-# Open Quote Desk outside the cloud workspace
+# Free deployment: PythonAnywhere
 
-The server in the coding workspace is private. Its successful internal health
-check does not create a public website. Workspace file links, opening
-`index.html`, and GitHub Pages cannot run this application's Python API.
+The website must run its Python server. Opening `index.html` or a GitHub Pages
+copy cannot provide login, a database or message delivery.
 
-## Render deployment
+PythonAnywhere's **Beginner/free** account can host this app with a persistent
+SQLite database. No paid disk or paid web service is selected by this setup.
+No hosting account has been created or website deployed by publishing these files.
 
-`render.yaml` prepares one Python web service with a persistent disk, HTTPS
-cookies, a health check and the reminder worker. The `starter` service and
-persistent disk incur Render charges; review current pricing in Render before
-creating them. No hosting account, paid service or public deployment has been
-created by adding this file.
+## Create the free website
 
-1. Publish the completed application files to your GitHub repository. The
-   source in this workspace includes the new Python backend; a host cannot
-   deploy those files until they exist in the branch it builds. Do not commit
-   `.venv`, `instance`, private databases, session keys or provider credentials.
-2. In Render, create a Blueprint connected to that repository and select the
-   branch containing `render.yaml`. Review the service and persistent-disk
-   charges before creating the resources. Automatic deployments are off so
-   future repository changes require an explicit deployment.
-3. Wait for the build and health check to finish. Open the HTTPS address that
-   Render assigns in its dashboard. This is the address to use on your phone
-   or computer. Confirm `/api/health` returns `{"status":"ok"}`, then create
-   your business account in the app.
-4. Create a sample enquiry, restart the service from Render, and sign in to
-   confirm it remains saved. The disk keeps the database and session signing
-   key at `/var/data/quote-desk`. The deployment starts with a new database;
-   transferring existing workspace data requires a private backup and restore.
-5. Add the Resend, Twilio and OpenAI settings documented in `README.md` through
-   Render's secret environment settings when ready to enable those features.
-   They are optional for opening the app and using enquiries and on-screen
-   reminders. Restart the service after changing environment variables.
+1. Create a free account at https://www.pythonanywhere.com/registration/register/beginner/.
+   Choose the free Beginner account. Open a Bash console from its dashboard.
+2. Clone the app and run its setup helper:
 
-Keep the service running continuously for timely automated reminders and take
-database backups. Use the `app.py` launcher: it starts both Waitress and the
-background reminder worker. Static hosting and a plain Flask/Gunicorn factory
-without a worker are insufficient for the complete application.
+   ```sh
+   git clone https://github.com/majidhussain02829-hub/Kaiser.git ~/Kaiser
+   cd ~/Kaiser
+   bash deploy/setup-pythonanywhere.sh
+   ```
 
-## Other Python hosting
+   If `~/Kaiser` already exists, update your existing checkout after preserving
+   any local changes. Do not clone over it. The helper preserves existing private
+   settings and creates a Python virtual environment, installs pinned packages
+   and runs the test suite. It reports which Python version to select.
+3. In the **Web** tab, choose **Add a new web app**, use the free domain assigned
+   to your account, and choose **Manual configuration** with the same Python
+   version reported by setup (3.12 or newer).
+4. Set the virtualenv field to `/home/YOUR_USERNAME/Kaiser/.venv`.
+5. Open the WSGI configuration link in that Web tab. Replace the generated sample
+   WSGI code with the contents of `deploy/pythonanywhere_wsgi.py`, then save.
+   The configuration automatically uses your home directory and loads the app
+   from `~/Kaiser`.
+6. Click **Reload**. Open the exact HTTPS website address shown in the Web tab
+   and create your business account. Confirm `/api/health` returns
+   `{"status":"ok"}`. Create an enquiry, reload the web app and sign in to verify
+   it remains saved.
 
-Use Python 3.12 or newer and install `requirements.txt`. Set `QUOTE_DESK_DATA`
-to a private directory on persistent storage and `COOKIE_SECURE=1` behind
-HTTPS. Run one always-on application instance with:
+The database and session key live at `~/.local/share/quote-desk/`, outside the
+checkout. Provider keys and the optional scheduler token live in the private
+file `~/.config/quote-desk/environment.json` (permissions 0600). This file starts
+empty; no API credentials are needed for the basic website. Never commit these
+private files. Reload the web app after changing private settings.
+
+Operator commands must point to that same data directory. In a Bash console:
 
 ```sh
-python app.py --host 0.0.0.0 --port "$PORT"
+cd ~/Kaiser
+QUOTE_DESK_DATA="$HOME/.local/share/quote-desk" .venv/bin/python manage.py backup "$HOME/quote-desk-backup.sqlite3"
+QUOTE_DESK_DATA="$HOME/.local/share/quote-desk" .venv/bin/python manage.py reset-password owner@example.com
 ```
 
-The host supplies `PORT` and the public HTTPS address. Use `/api/health` as its
-readiness check. Starting this command inside the private coding workspace
-alone does not make it publicly reachable.
+Choose a new backup filename each time, store backups privately and reload the
+web app after password recovery to activate its new session signing key.
+
+Free accounts currently have a small CPU/disk allowance and one web app; new
+accounts have 512 MiB of disk. Renew the web app before its one-month expiry
+using the button on the Web tab. Back up the database as described in README.md.
+This is small-scale free hosting with quotas, not an always-on service guarantee.
+
+## Free hourly follow-up checks
+
+Free PythonAnywhere accounts do not include always-on tasks, and new free
+accounts do not include scheduled tasks. The WSGI configuration intentionally
+does not start an unreliable background thread. On-screen reminders still work.
+
+The included GitHub Actions workflow `.github/workflows/followups.yml` can
+invoke the authenticated scheduler endpoint approximately once an hour. It is
+inactive until a repository variable is configured. No third-party cron account
+or paid hosting worker is required.
+
+1. Generate a long random scheduler token in your own secure password manager,
+   or in a private console, and store it in the PythonAnywhere private JSON
+   configuration as `QUOTE_SCHEDULER_TOKEN`. Use at least 32 random printable
+   characters without spaces. Do not paste the token into chat or Git.
+2. In the Kaiser repository, open **Settings → Secrets and variables → Actions**.
+   Add a repository secret named `QUOTE_SCHEDULER_TOKEN` with the same token.
+   Add a repository variable named `QUOTE_SCHEDULER_URL` with your actual website
+   address followed by `/api/automations/tick` (HTTPS).
+3. Reload the PythonAnywhere web app. In GitHub's **Actions** tab, enable the
+   workflow and run **Hourly quote follow-ups → Run workflow** once. Confirm a
+   successful result and inspect the app's message history.
+4. In the app's Automations page, enable the channels you want. Customer
+   follow-ups still require recorded permission and a due quoted enquiry.
+
+The token can trigger only due automation processing; it does not grant access
+to business records or browser sessions. A missing token disables the endpoint.
+Browser API routes retain CSRF protection. Do not put the token in a URL.
+Each tick processes at most 10 messages within a cooperative 45-second budget;
+remaining jobs stay queued for a later check. Provider socket timeouts are
+limited by the time remaining. Large backlogs need additional manual checks or
+an appropriately sized hosting plan.
+
+GitHub schedules can be delayed; reminders may run on the next hourly check
+rather than exactly at the selected hour. Public repositories can have scheduled
+workflows disabled after 60 days without activity. Standard hosted-runner jobs
+are free for public repositories. Private repositories use included Actions
+minutes; this workflow has a two-minute limit per hourly run. Review your account's
+remaining allowance and keep paid overage disabled/a zero spending budget if
+applicable. The workflow does not purchase capacity or change billing settings.
+
+## Email, SMS and AI
+
+The website and on-screen reminders work without provider accounts. Live
+messages and AI use the provider bindings described in README.md. Configure them
+in the private JSON file, then reload. Hosting being free does not make SMS or
+AI API usage free; leave those integrations unconfigured to avoid provider costs.
+
+PythonAnywhere free outbound Internet access is restricted to its allowlist.
+Twilio proxy use is documented by the provider. Resend/OpenAI availability must
+be checked on the deployed account; their reachability has not been verified.
+The application's HTTPS client uses the host's proxy environment configuration
+and retains TLS verification. Do not enable automations until a controlled test
+with your own recipient succeeds.
+
+## Optional paid Render configuration
+
+The earlier paid Render example was moved to `deploy/render-paid.yaml` so there
+is no paid default Blueprint at the repository root. Do not use that file when
+you want free hosting. Render's free local filesystem does not preserve this
+app's SQLite database across restarts, so simply changing its plan to `free`
+would risk losing business records.
+
+Official provider references:
+
+- https://help.pythonanywhere.com/pages/FreeAccountsFeatures/
+- https://help.pythonanywhere.com/pages/AlwaysOnTasks/
+- https://help.pythonanywhere.com/pages/TwilioBehindTheProxy/
+- https://www.pythonanywhere.com/whitelist/

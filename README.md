@@ -60,8 +60,9 @@ The test suite exercises authentication, CSRF, CRUD, persistent data across appl
 
 ## Hosting
 
-See [DEPLOY.md](DEPLOY.md) and the included Render Blueprint for a complete
-Python web-service deployment with persistent storage. The app has not been
+See [DEPLOY.md](DEPLOY.md) for the free PythonAnywhere setup with persistent
+SQLite storage and an optional hourly GitHub scheduler. The earlier paid Render
+example is in `deploy/render-paid.yaml`; it is not the default deployment. The app has not been
 deployed publicly; opening this repository's HTML file or GitHub Pages cannot
 run the backend.
 
@@ -78,7 +79,7 @@ Open **Automations** to see due follow-ups, message history, provider setup stat
 2. Choose **Message**, select email or SMS and a message purpose, then **Generate draft**. When OpenAI is connected this generates an editable AI draft; otherwise the app explicitly labels a standard template. AI receives customer name, service, job details, status and amount, without contact addresses/numbers. Review generated text before choosing **Queue message**.
 3. For automatic quote follow-ups, set status **Quoted**, a follow-up date, contact permission and the desired customer channel in Automations. Enable AI for automatic messages only if you want those drafts sent without individual review. Otherwise a standard template is used.
 4. For owner reminders, enable **Email me when follow-ups are due**. The recipient is your account email. All active statuses (New, Contacted and Quoted) are included. On-screen reminders work without a delivery provider. **Tomorrow** moves the follow-up date forward.
-5. Choose your business timezone (default `Australia/Darwin`) and local send hour (default 09:00). The scheduler scans every 60 seconds while `app.py` is running. It sends each enabled channel once per enquiry's follow-up date, including overdue dates. Changing a date schedules a new reminder. Closed enquiries do not trigger automatic follow-ups.
+5. Choose your business timezone (default `Australia/Darwin`) and local send hour (default 09:00). The standard `app.py` launcher scans every 60 seconds. Free PythonAnywhere hosting uses the optional hourly external scheduler instead. It sends each enabled channel once per enquiry's follow-up date, including overdue dates. Changing a date schedules a new reminder. Closed enquiries do not trigger automatic follow-ups.
 
 The same database retains the message outbox and history across restarts. **Queued**, **Needs setup**, **Provider accepted**, **Failed**, **Cancelled**, and **Delivery uncertain** have different meanings. Provider acceptance is not confirmation of recipient delivery; delivery receipts and incoming replies are not synced into this app. Look at the provider dashboard for final delivery and reply status. Check messages with an uncertain result before attempting any new send; the app does not automatically retry failures or interrupted sends. Messages blocked before contacting a provider have an explicit **Retry after setup** action. Repeating a manual request with the same request ID does not send twice.
 
@@ -100,6 +101,6 @@ Supply credentials securely through environment settings or your host's secret m
 
 Allow those three API hostnames in restricted network settings. Provider setup indicators show whether required bindings are present, not a verified account, sender or successful delivery. Verified senders, Twilio destination permissions/trial restrictions, sufficient provider credit and working network access are also prerequisites. Twilio uses HTTP Basic authentication: the runtime must supply a usable token to that adapter. If a secret proxy provides only a placeholder it cannot replace inside Base64 authorization, bind the real token through the hosting platform's supported secure runtime mechanism; do not extract proxy credentials. Email and AI keys use Bearer headers.
 
-Restart the application after changing runtime environment variables. The standard `app.py` command starts the scheduler automatically; custom WSGI launchers must also start `automations.start_worker(app)` once per process or call `process_automations(app)` from a trusted periodic job. No external cron is required with the standard launcher. Keep the server continuously running for timely reminders. The database outbox coordinates multiple workers; provider errors with ambiguous results are retained for operator review.
+Restart the application after changing runtime environment variables. The standard `app.py` command starts the scheduler automatically; custom WSGI launchers must also start `automations.start_worker(app)` once per process or call `process_automations(app)` from a trusted periodic job. No external cron is required with the standard launcher. On free WSGI hosting, use the authenticated hourly GitHub workflow documented in DEPLOY.md instead of a background thread. Keep the server continuously running for timely reminders. The database outbox coordinates multiple workers; provider errors with ambiguous results are retained for operator review.
 
 Run `.venv/bin/python -m unittest -v` for the provider-mocked automation tests alongside the original application suite. Tests exercise payloads, consent, owner reminders, timezone scheduling, deduplication, isolation, missing-provider states and send failures without contacting live customers or providers. Live delivery and AI generation still need credentials and a controlled verification using your own recipients.

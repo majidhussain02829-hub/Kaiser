@@ -1,0 +1,32 @@
+name: Hourly quote follow-ups
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "37 * * * *"
+
+permissions: {}
+
+jobs:
+  check-followups:
+    if: ${{ vars.QUOTE_SCHEDULER_URL != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Process due reminders and queued messages
+        env:
+          SCHEDULER_URL: ${{ vars.QUOTE_SCHEDULER_URL }}
+          SCHEDULER_TOKEN: ${{ secrets.QUOTE_SCHEDULER_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$SCHEDULER_URL" != https://* || ${#SCHEDULER_TOKEN} -lt 32 ]]; then
+            echo "Configure the HTTPS scheduler URL and secret before enabling this job."
+            exit 1
+          fi
+          curl --proto '=https' --fail --silent --show-error --max-time 70 \
+            --request POST \
+            --header "Authorization: Bearer $SCHEDULER_TOKEN" \
+            --header "Content-Type: application/json" \
+            --data '{}' \
+            "$SCHEDULER_URL"

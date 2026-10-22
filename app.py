@@ -74,6 +74,10 @@ def create_app(database=None, testing=False):
 
     @app.before_request
     def protect():
+        # External cron uses its own deployment-scoped Bearer credential.
+        # Browser APIs keep their existing session and CSRF protections.
+        if request.endpoint == 'automation_tick':
+            return
         if request.method in {'POST', 'PUT', 'DELETE'}:
             if request.headers.get('X-CSRF-Token') != session.get('csrf') or not session.get('csrf'):
                 abort(403, description='Your session expired. Reload and try again.')
@@ -281,6 +285,8 @@ def create_app(database=None, testing=False):
 
     from automations import register_automations
     register_automations(app, db, user, data, text, throttle)
+    from scheduler import register_scheduler
+    register_scheduler(app)
     return app
 
 
