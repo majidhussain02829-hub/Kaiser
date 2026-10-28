@@ -19,6 +19,7 @@ Open the app on port 8000 in a browser and select **Create an account**. Supply 
 
 - Account registration, sign-in, sign-out, password hashing and eight-hour signed sessions.
 - Separate business workspaces, with ownership checked on every private API operation.
+- Account page to update the business name without changing the customer enquiry link, change the password with current-password verification, and sign out on desktop or mobile. Password changes revoke other sessions for that account immediately, including across server restarts; other businesses stay signed in.
 - Persistent enquiry creation, editing and deletion, with stale-edit detection.
 - Server validation of fields, statuses, amounts and dates.
 - Open enquiry totals, quoted pipeline, won values, search, filters and follow-up scheduling.

@@ -66,6 +66,9 @@ def create_app(database=None, testing=False):
           bucket TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
         ''')
         # Additive upgrades preserve existing businesses and their enquiries.
+        user_columns = {row['name'] for row in db().execute('PRAGMA table_info(users)')}
+        if 'session_version' not in user_columns:
+            db().execute('ALTER TABLE users ADD COLUMN session_version INTEGER NOT NULL DEFAULT 0')
         columns = {row['name'] for row in db().execute('PRAGMA table_info(enquiries)')}
         for column in ('email_consent', 'sms_consent'):
             if column not in columns:
@@ -118,7 +121,7 @@ def create_app(database=None, testing=False):
 
     def user():
         row = db().execute('SELECT * FROM users WHERE id=?', (session.get('user_id'),)).fetchone()
-        if not row:
+        if not row or session.get('session_version', 0) != row['session_version']:
             abort(401, description='Please sign in.')
         return row
 
@@ -187,6 +190,10 @@ def create_app(database=None, testing=False):
     def current_session():
         session.setdefault('csrf', secrets.token_hex(32))
         row = db().execute('SELECT * FROM users WHERE id=?', (session.get('user_id'),)).fetchone()
+        if row and session.get('session_version', 0) != row['session_version']:
+            session.clear()
+            session['csrf'] = secrets.token_hex(32)
+            row = None
         return jsonify(csrf=session['csrf'], user=user_info(row) if row else None)
 
     @app.post('/api/register')
@@ -220,7 +227,7 @@ def create_app(database=None, testing=False):
         if not row or not valid:
             abort(401, description='Email or password is incorrect.')
         session.clear()
-        session.update(user_id=row['id'], csrf=secrets.token_hex(32))
+        session.update(user_id=row['id'], session_version=row['session_version'], csrf=secrets.token_hex(32))
         session.permanent = True
         return jsonify(user=user_info(row), csrf=session['csrf'])
 
@@ -228,6 +235,40 @@ def create_app(database=None, testing=False):
     def logout():
         session.clear()
         return jsonify(ok=True)
+
+    @app.put('/api/account')
+    def update_account():
+        owner = user()
+        business = text(data(), 'business', 100, True)
+        with db():
+            db().execute('UPDATE users SET business=? WHERE id=?', (business, owner['id']))
+        return jsonify(user=user_info(user()))
+
+    @app.post('/api/account/password')
+    def change_password():
+        owner = user()
+        throttle('password-change', 10, 900)
+        d = data()
+        current = text(d, 'current_password', 256, True)
+        password = text(d, 'new_password', 256, True)
+        confirmation = text(d, 'confirm_password', 256, True)
+        if not check_password_hash(owner['password'], current):
+            abort(400, description='Current password is incorrect.')
+        if len(password) < 12 or password != confirmation:
+            abort(400, description='New passwords must match and contain 12–256 characters.')
+        if password == current:
+            abort(400, description='Choose a different new password.')
+        with db():
+            updated = db().execute(
+                'UPDATE users SET password=?, session_version=session_version+1 WHERE id=? AND session_version=?',
+                (generate_password_hash(password), owner['id'], owner['session_version']))
+        if not updated.rowcount:
+            abort(409, description='Account changed. Sign in again before retrying.')
+        session.clear()
+        session.update(user_id=owner['id'], session_version=owner['session_version'] + 1,
+                       csrf=secrets.token_hex(32))
+        session.permanent = True
+        return jsonify(ok=True, csrf=session['csrf'])
 
     @app.get('/api/enquiries')
     def listing():
