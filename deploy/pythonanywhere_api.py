@@ -31,7 +31,7 @@ API_ORIGINS = {'https://www.pythonanywhere.com', 'https://eu.pythonanywhere.com'
 PACKAGES = {'Flask': 'flask', 'Werkzeug': 'werkzeug', 'Jinja2': 'jinja2',
             'click': 'click', 'blinker': 'blinker', 'itsdangerous': 'itsdangerous',
             'MarkupSafe': 'markupsafe', 'waitress': 'waitress'}
-SOURCE_FILES = ('app.py', 'automations.py', 'scheduler.py', 'index.html')
+SOURCE_FILES = ('app.py', 'automations.py', 'scheduler.py', 'index.html', 'quote_document.py')
 MARKER = '.quote-desk-deployment.json'
 
 

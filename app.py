@@ -10,7 +10,7 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
-from flask import Flask, abort, g, jsonify, request, send_file, session
+from flask import Flask, abort, g, jsonify, request, send_file, session, render_template_string
 from werkzeug.security import check_password_hash, generate_password_hash
 
 ROOT = Path(__file__).resolve().parent
@@ -70,6 +70,9 @@ def create_app(database=None, testing=False):
         for column in ('email_consent', 'sms_consent'):
             if column not in columns:
                 db().execute(f'ALTER TABLE enquiries ADD COLUMN {column} INTEGER NOT NULL DEFAULT 0')
+        for column in ('quote_scope', 'quote_terms'):
+            if column not in columns:
+                db().execute(f"ALTER TABLE enquiries ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         db().commit()
 
     @app.before_request
@@ -140,6 +143,8 @@ def create_app(database=None, testing=False):
     def enquiry(d, public=False):
         result = {k: text(d, k, n, k in {'name', 'suburb', 'job'}) for k, n in
                   [('name',100), ('email',150), ('phone',40), ('suburb',100), ('service',50), ('job',2000), ('status',20), ('amount',20), ('followup',10)]}
+        for field, limit in [('quote_scope', 4000), ('quote_terms', 2000)]:
+            result[field] = '' if public else text(d, field, limit)
         if result['email'] and not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+', result['email']):
             abort(400, description='Enter a valid email address.')
         for channel in ('email', 'sms'):
@@ -260,6 +265,19 @@ def create_app(database=None, testing=False):
         if not cursor.rowcount:
             abort(409, description='This enquiry changed or is unavailable. Refresh before trying again.')
         return jsonify(ok=True)
+
+    @app.get('/quotes/<identifier>')
+    def print_quote(identifier):
+        owner = user()
+        entry = db().execute('SELECT * FROM enquiries WHERE id=? AND user_id=?',
+                             (identifier, owner['id'])).fetchone()
+        if not entry:
+            abort(404, description='Quote unavailable.')
+        if entry['amount'] == '' or not entry['quote_scope']:
+            abort(400, description='Save a quote amount and customer-facing scope before previewing.')
+        from quote_document import TEMPLATE
+        return render_template_string(TEMPLATE, entry=entry, business=owner['business'],
+                                      contact=owner['email'], total=f"{Decimal(entry['amount']):,.2f}")
 
     @app.get('/api/public/<public_id>')
     def public_info(public_id):

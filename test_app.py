@@ -69,6 +69,77 @@ class AppTests(unittest.TestCase):
                 self.assertEqual(self.send(self.a, 'POST', '/api/enquiries', dict(self.payload, **{field:value})).status_code, 400)
         self.assertEqual(self.send(self.a, 'POST', '/api/enquiries', []).status_code, 400)
 
+    def test_quote_preview_is_private_and_excludes_internal_fields(self):
+        self.register(self.a)
+        self.register(self.b, 'other@example.com')
+        payload = dict(self.payload, job='PRIVATE NOTE: supplier margin 40%',
+                       quote_scope='Replace tap <script>alert(1)</script>',
+                       quote_terms='Valid for 14 days. Total includes applicable tax.')
+        identifier = self.send(self.a, 'POST', '/api/enquiries', payload).json['id']
+        path = '/quotes/' + identifier
+        self.assertEqual(self.app.test_client().get(path).status_code, 401)
+        self.assertEqual(self.b.get(path).status_code, 404)
+        response = self.a.get(path)
+        self.assertEqual(response.status_code, 200)
+        html = response.get_data(as_text=True)
+        for expected in ('A$120.50', 'Test Business', 'Valid for 14 days',
+                         '&lt;script&gt;alert(1)&lt;/script&gt;', 'Revision 1'):
+            self.assertIn(expected, html)
+        for private in ('PRIVATE NOTE', '2026-12-01', '<script>alert(1)</script>'):
+            self.assertNotIn(private, html)
+        self.assertEqual(response.headers['Cache-Control'], 'no-store')
+        self.send(self.a, 'DELETE', '/api/enquiries/' + identifier, {'version': 1})
+        self.assertEqual(self.a.get(path).status_code, 404)
+
+    def test_quote_requires_saved_scope_and_amount_and_allows_zero(self):
+        self.register(self.a)
+        identifier = self.send(self.a, 'POST', '/api/enquiries', self.payload).json['id']
+        path = '/quotes/' + identifier
+        self.assertEqual(self.a.get(path).status_code, 400)
+        for version, amount, code in [(1, '', 400), (2, '0', 200)]:
+            result = self.send(self.a, 'PUT', '/api/enquiries/' + identifier,
+                               dict(self.payload, version=version, amount=amount,
+                                    quote_scope='Inspection only'))
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(self.a.get(path).status_code, code)
+        self.assertIn('A$0.00', self.a.get(path).get_data(as_text=True))
+
+    def test_public_submit_cannot_supply_quote_content(self):
+        owner = self.register(self.a)
+        self.assertEqual(self.send(self.b, 'POST', '/api/public/' + owner['public_id'],
+                                   dict(self.payload, quote_scope='Fake offer', quote_terms='Free')).status_code, 201)
+        entry = self.a.get('/api/enquiries').json['entries'][0]
+        self.assertEqual(entry['quote_scope'], '')
+        self.assertEqual(entry['quote_terms'], '')
+
+    def test_quote_fields_validate_and_survive_restart(self):
+        self.register(self.a)
+        for field, value in [('quote_scope', 'x' * 4001), ('quote_terms', 'x' * 2001),
+                             ('quote_scope', 42), ('quote_terms', None)]:
+            self.assertEqual(self.send(self.a, 'POST', '/api/enquiries',
+                                       dict(self.payload, **{field: value})).status_code, 400)
+        self.send(self.a, 'POST', '/api/enquiries', dict(self.payload, quote_scope='Customer scope', quote_terms='Terms'))
+        client = create_app(self.path, testing=True).test_client()
+        self.send(client, 'POST', '/api/login', dict(email='owner@example.com', password='long-test-password'))
+        entry = client.get('/api/enquiries').json['entries'][0]
+        self.assertEqual(entry['quote_scope'], 'Customer scope')
+        self.assertEqual(entry['quote_terms'], 'Terms')
+
+    def test_existing_database_gains_quote_fields_without_losing_records(self):
+        import sqlite3
+        self.register(self.a)
+        self.send(self.a, 'POST', '/api/enquiries', self.payload)
+        with sqlite3.connect(self.path) as conn:
+            conn.execute('ALTER TABLE enquiries DROP COLUMN quote_scope')
+            conn.execute('ALTER TABLE enquiries DROP COLUMN quote_terms')
+        client = create_app(self.path, testing=True).test_client()
+        self.send(client, 'POST', '/api/login', dict(email='owner@example.com', password='long-test-password'))
+        entry = client.get('/api/enquiries').json['entries'][0]
+        self.assertEqual(entry['name'], 'Customer')
+        self.assertEqual(entry['amount'], '120.50')
+        self.assertEqual(entry['quote_scope'], '')
+        self.assertEqual(entry['quote_terms'], '')
+
     def test_throttle(self):
         owner = self.register(self.a)
         path = '/api/public/' + owner['public_id']
