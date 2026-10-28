@@ -23,6 +23,7 @@ Open the app on port 8000 in a browser and select **Create an account**. Supply 
 - Server validation of fields, statuses, amounts and dates.
 - Open enquiry totals, quoted pipeline, won values, search, filters and follow-up scheduling.
 - A customer form at `/request/<business-public-id>`, linked from the dashboard. Customers need no account; submissions appear in the owning business's workspace. Refresh the dashboard to retrieve new submissions.
+- Customer quote preview with separate customer-facing scope and terms; print or save as PDF without including internal notes.
 - CSV export of all enquiries, including protection against spreadsheet formula injection.
 - CSRF protection and rate limiting of account creation, login and public submissions. Limits use the direct socket address; behind a proxy they conservatively share a quota. Configure a trusted proxy strategy before scaling.
 - Responsive layout and server health check at `/api/health`.
@@ -104,3 +105,20 @@ Allow those three API hostnames in restricted network settings. Provider setup i
 Restart the application after changing runtime environment variables. The standard `app.py` command starts the scheduler automatically; custom WSGI launchers must also start `automations.start_worker(app)` once per process or call `process_automations(app)` from a trusted periodic job. No external cron is required with the standard launcher. On free WSGI hosting, use the authenticated hourly GitHub workflow documented in DEPLOY.md instead of a background thread. Keep the server continuously running for timely reminders. The database outbox coordinates multiple workers; provider errors with ambiguous results are retained for operator review.
 
 Run `.venv/bin/python -m unittest -v` for the provider-mocked automation tests alongside the original application suite. Tests exercise payloads, consent, owner reminders, timezone scheduling, deduplication, isolation, missing-provider states and send failures without contacting live customers or providers. Live delivery and AI generation still need credentials and a controlled verification using your own recipients.
+
+## Printable customer quotes
+
+Open an enquiry, enter its quote amount, **Customer-facing quote scope** and
+optional **Quote terms**, then choose **Save & preview quote**. Saving first
+ensures the preview uses the latest record and rejects stale edits. Choose
+**Print / save PDF** and select your browser's PDF destination to create a file
+for manual sharing. The preview link requires the business owner's login;
+send the saved PDF to customers, not that private link.
+
+Only the customer-facing scope and terms appear. Internal job notes, follow-up
+dates and contact permissions are excluded. Existing enquiries start with empty
+quote fields; no private notes are copied automatically. Specify actual tax
+treatment, validity and exclusions in the terms where needed. The app does not
+calculate GST, create tax invoices, collect payments or record acceptance.
+The preview reflects the current saved enquiry, not an immutable issued quote;
+retain the PDF you share. Revisions follow the enquiry's edit version.
