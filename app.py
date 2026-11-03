@@ -387,3 +387,42 @@ def create_app(database=None, testing=False):
                          download_name='Quote-'+row['quote_number']+'.pdf')
 
     @app.get('/api/public/<public_id>')
+
+    def public_info(public_id):
+        row = db().execute('SELECT business FROM users WHERE public_id=?', (public_id,)).fetchone()
+        if not row:
+            abort(404, description='This enquiry form is unavailable.')
+        session.setdefault('csrf', secrets.token_hex(32))
+        return jsonify(business=row['business'], csrf=session['csrf'])
+
+    @app.post('/api/public/<public_id>')
+    def public_create(public_id):
+        throttle('public', 10, 3600)
+        row = db().execute('SELECT id FROM users WHERE public_id=?', (public_id,)).fetchone()
+        if not row:
+            abort(404, description='This enquiry form is unavailable.')
+        insert(row['id'], enquiry(data(), public=True))
+        return jsonify(ok=True), 201
+
+    @app.get('/api/health')
+    def health():
+        db().execute('SELECT 1').fetchone()
+        return jsonify(status='ok')
+
+    from automations import register_automations
+    register_automations(app, db, user, data, text, throttle)
+    from scheduler import register_scheduler
+    register_scheduler(app)
+    return app
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--host', default='127.0.0.1')
+    parser.add_argument('--port', type=int, default=8000)
+    args = parser.parse_args()
+    from waitress import serve
+    from automations import start_worker
+    application = create_app()
+    start_worker(application)
+    serve(application, host=args.host, port=args.port, threads=4)
