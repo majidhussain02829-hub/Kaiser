@@ -1,6 +1,8 @@
 """Quote Desk: authenticated business workspaces and persistent enquiries."""
 import argparse
 import hashlib
+import io
+import json
 import os
 import re
 import secrets
@@ -12,6 +14,13 @@ from pathlib import Path
 
 from flask import Flask, abort, g, jsonify, request, send_file, session
 from werkzeug.security import check_password_hash, generate_password_hash
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_RIGHT
+from reportlab.lib.pagesizes import A4
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+from xml.sax.saxutils import escape
 
 ROOT = Path(__file__).resolve().parent
 STATUSES = {'New', 'Contacted', 'Quoted', 'Won', 'Lost'}
@@ -64,6 +73,14 @@ def create_app(database=None, testing=False):
           created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         CREATE TABLE IF NOT EXISTS rate_limits (
           bucket TEXT PRIMARY KEY, count INTEGER NOT NULL, expires INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS quotes (
+          id TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id),
+          enquiry_id TEXT NOT NULL REFERENCES enquiries(id) ON DELETE CASCADE,
+          quote_number TEXT NOT NULL UNIQUE, quote_date TEXT NOT NULL,
+          valid_until TEXT NOT NULL, items_json TEXT NOT NULL,
+          subtotal TEXT NOT NULL, gst TEXT NOT NULL, total TEXT NOT NULL,
+          notes TEXT NOT NULL DEFAULT '', terms TEXT NOT NULL DEFAULT '',
+          created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
         ''')
         # Additive upgrades preserve existing businesses and their enquiries.
         columns = {row['name'] for row in db().execute('PRAGMA table_info(enquiries)')}
@@ -261,7 +278,116 @@ def create_app(database=None, testing=False):
             abort(409, description='This enquiry changed or is unavailable. Refresh before trying again.')
         return jsonify(ok=True)
 
+    @app.post('/api/enquiries/<identifier>/quote')
+    def create_quote(identifier):
+        owner = user()
+        d = data()
+        enquiry_row = db().execute('SELECT * FROM enquiries WHERE id=? AND user_id=?', (identifier, owner['id'])).fetchone()
+        if not enquiry_row:
+            abort(404, description='This enquiry is unavailable.')
+        raw_items = d.get('items')
+        if not isinstance(raw_items, list) or not 1 <= len(raw_items) <= 40:
+            abort(400, description='Add between 1 and 40 quote items.')
+        items = []
+        subtotal = Decimal('0.00')
+        for raw in raw_items:
+            if not isinstance(raw, dict):
+                abort(400, description='Each quote item must be an object.')
+            description = raw.get('description', '')
+            if not isinstance(description, str) or not description.strip() or len(description.strip()) > 180:
+                abort(400, description='Each item needs a description of up to 180 characters.')
+            try:
+                quantity = Decimal(str(raw.get('quantity', '')))
+                unit_price = Decimal(str(raw.get('unit_price', '')))
+                if (not quantity.is_finite() or quantity <= 0 or quantity > 9999 or
+                    not unit_price.is_finite() or unit_price < 0 or unit_price > 999999.99 or
+                    quantity.as_tuple().exponent < -2 or unit_price.as_tuple().exponent < -2):
+                    raise InvalidOperation
+                line_total = (quantity * unit_price).quantize(Decimal('.01'))
+            except (InvalidOperation, ValueError, TypeError):
+                abort(400, description='Enter valid quantities and unit prices with up to two decimal places.')
+            items.append({'description': description.strip(), 'quantity': str(quantity),
+                          'unit_price': str(unit_price.quantize(Decimal('.01'))), 'line_total': str(line_total)})
+            subtotal += line_total
+        subtotal = subtotal.quantize(Decimal('.01'))
+        gst_enabled = d.get('gst', False)
+        if not isinstance(gst_enabled, bool):
+            abort(400, description='GST must be true or false.')
+        gst = (subtotal * Decimal('.10')).quantize(Decimal('.01')) if gst_enabled else Decimal('0.00')
+        total = subtotal + gst
+        valid_until = d.get('valid_until', '')
+        if not isinstance(valid_until, str):
+            abort(400, description='Enter a valid quote expiry date.')
+        try:
+            valid_until = date.fromisoformat(valid_until).isoformat()
+            if date.fromisoformat(valid_until) < date.today():
+                abort(400, description='The quote expiry date cannot be in the past.')
+        except ValueError:
+            abort(400, description='Enter a valid quote expiry date.')
+        notes = d.get('notes', '')
+        terms = d.get('terms', '')
+        if not isinstance(notes, str) or len(notes) > 1500 or not isinstance(terms, str) or len(terms) > 1500:
+            abort(400, description='Notes and terms must each be 1,500 characters or fewer.')
+        quote_id = secrets.token_hex(12)
+        quote_number = 'QD-' + date.today().strftime('%Y%m%d') + '-' + secrets.token_hex(3).upper()
+        with db():
+            db().execute('INSERT INTO quotes (id,user_id,enquiry_id,quote_number,quote_date,valid_until,items_json,subtotal,gst,total,notes,terms) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+                         (quote_id, owner['id'], identifier, quote_number, date.today().isoformat(), valid_until,
+                          json.dumps(items), str(subtotal), str(gst), str(total), notes.strip(), terms.strip()))
+            db().execute("UPDATE enquiries SET amount=?,status='Quoted',version=version+1 WHERE id=? AND user_id=?", (str(total), identifier, owner['id']))
+        return jsonify(id=quote_id, quote_number=quote_number, subtotal=str(subtotal), gst=str(gst), total=str(total), pdf_url='/api/quotes/'+quote_id+'.pdf'), 201
+
+    @app.get('/api/quotes/<quote_id>.pdf')
+    def quote_pdf(quote_id):
+        owner = user()
+        row = db().execute('SELECT q.*,e.name AS customer_name,e.email AS customer_email,e.phone AS customer_phone,e.suburb,e.service,e.job,u.business,u.email AS business_email FROM quotes q JOIN enquiries e ON e.id=q.enquiry_id JOIN users u ON u.id=q.user_id WHERE q.id=? AND q.user_id=?', (quote_id, owner['id'])).fetchone()
+        if not row:
+            abort(404, description='This quote is unavailable.')
+        buffer = io.BytesIO()
+        doc = SimpleDocTemplate(buffer, pagesize=A4, rightMargin=20*mm, leftMargin=20*mm, topMargin=19*mm, bottomMargin=18*mm,
+                                title='Quote '+row['quote_number'], author=row['business'])
+        styles = getSampleStyleSheet()
+        styles.add(ParagraphStyle(name='Brand', parent=styles['Title'], fontName='Helvetica-Bold', fontSize=23, leading=27, textColor=colors.HexColor('#174734'), alignment=0, spaceAfter=3))
+        styles.add(ParagraphStyle(name='SmallMuted', parent=styles['Normal'], fontSize=8.5, leading=12, textColor=colors.HexColor('#66776d')))
+        styles.add(ParagraphStyle(name='SectionQD', parent=styles['Heading2'], fontSize=10, leading=13, textColor=colors.HexColor('#174734'), spaceBefore=10, spaceAfter=5))
+        styles.add(ParagraphStyle(name='RightQD', parent=styles['Normal'], fontSize=9, leading=13, alignment=TA_RIGHT))
+        money_fmt = lambda value: chr(36) + format(Decimal(value), ',.2f')
+        story = [Paragraph(escape(row['business']), styles['Brand']),
+                 Paragraph(escape(row['business_email']), styles['SmallMuted']), Spacer(1, 12),
+                 Paragraph('QUOTE', styles['Heading1'])]
+        meta = [[Paragraph('<b>Quote number</b><br/>'+escape(row['quote_number']), styles['Normal']),
+                 Paragraph('<b>Issued</b><br/>'+escape(row['quote_date']), styles['Normal']),
+                 Paragraph('<b>Valid until</b><br/>'+escape(row['valid_until']), styles['Normal'])]]
+        meta_table = Table(meta, colWidths=[58*mm, 48*mm, 48*mm])
+        meta_table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#edf3ed')),('BOX',(0,0),(-1,-1),.5,colors.HexColor('#dce6dc')),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),9),('RIGHTPADDING',(0,0),(-1,-1),9),('TOPPADDING',(0,0),(-1,-1),9),('BOTTOMPADDING',(0,0),(-1,-1),9)]))
+        story += [meta_table, Paragraph('PREPARED FOR', styles['SectionQD']),
+                  Paragraph('<b>'+escape(row['customer_name'])+'</b><br/>'+escape(row['customer_email'] or '')+'<br/>'+escape(row['customer_phone'] or '')+'<br/>'+escape(row['suburb']), styles['Normal']),
+                  Paragraph('JOB DESCRIPTION', styles['SectionQD']), Paragraph(escape(row['job']).replace('\\n','<br/>'), styles['Normal']), Spacer(1, 12)]
+        data_rows = [[Paragraph('<b>Description</b>', styles['Normal']), Paragraph('<b>Qty</b>', styles['RightQD']), Paragraph('<b>Unit price</b>', styles['RightQD']), Paragraph('<b>Amount</b>', styles['RightQD'])]]
+        for item in json.loads(row['items_json']):
+            data_rows.append([Paragraph(escape(item['description']).replace('\\n','<br/>'), styles['Normal']),
+                              Paragraph(escape(item['quantity']), styles['RightQD']),
+                              Paragraph(money_fmt(item['unit_price']), styles['RightQD']),
+                              Paragraph(money_fmt(item['line_total']), styles['RightQD'])])
+        quote_table = Table(data_rows, colWidths=[83*mm, 18*mm, 34*mm, 34*mm], repeatRows=1)
+        quote_table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#174734')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),.35,colors.HexColor('#dfe7df')),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(1,0),(-1,-1),'RIGHT'),('LEFTPADDING',(0,0),(-1,-1),7),('RIGHTPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#f7f9f6')])]))
+        story += [quote_table, Spacer(1, 8)]
+        totals = [['Subtotal', money_fmt(row['subtotal'])], ['GST (10%)' if Decimal(row['gst']) else 'GST not charged', money_fmt(row['gst'])], ['TOTAL (AUD)', money_fmt(row['total'])]]
+        total_table = Table(totals, colWidths=[42*mm, 35*mm], hAlign='RIGHT')
+        total_table.setStyle(TableStyle([('ALIGN',(1,0),(-1,-1),'RIGHT'),('FONTNAME',(0,0),(-1,-2),'Helvetica'),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold'),('FONTSIZE',(0,-1),(-1,-1),12),('TEXTCOLOR',(0,-1),(-1,-1),colors.HexColor('#174734')),('LINEABOVE',(0,-1),(-1,-1),1,colors.HexColor('#174734')),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]))
+        story += [total_table]
+        if row['notes'].strip():
+            story += [Paragraph('NOTES', styles['SectionQD']), Paragraph(escape(row['notes']).replace('\\n','<br/>'), styles['Normal'])]
+        if row['terms'].strip():
+            story += [Paragraph('TERMS &amp; CONDITIONS', styles['SectionQD']), Paragraph(escape(row['terms']).replace('\\n','<br/>'), styles['Normal'])]
+        story += [Spacer(1, 16), Paragraph('Thank you for the opportunity to quote on this work.', styles['SmallMuted'])]
+        doc.build(story)
+        buffer.seek(0)
+        return send_file(buffer, mimetype='application/pdf', as_attachment=True,
+                         download_name='Quote-'+row['quote_number']+'.pdf')
+
     @app.get('/api/public/<public_id>')
+
     def public_info(public_id):
         row = db().execute('SELECT business FROM users WHERE public_id=?', (public_id,)).fetchone()
         if not row:

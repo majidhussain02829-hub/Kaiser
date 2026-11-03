@@ -69,6 +69,47 @@ class AppTests(unittest.TestCase):
                 self.assertEqual(self.send(self.a, 'POST', '/api/enquiries', dict(self.payload, **{field:value})).status_code, 400)
         self.assertEqual(self.send(self.a, 'POST', '/api/enquiries', []).status_code, 400)
 
+    def test_quote_pdf_creation_totals_and_business_isolation(self):
+        owner = self.register(self.a)
+        other = self.register(self.b, 'other@example.com')
+        created = self.send(self.a, 'POST', '/api/enquiries', self.payload)
+        enquiry_id = created.json['id']
+        quote_data = {
+            'items': [
+                {'description': 'Labour', 'quantity': '2', 'unit_price': '85.00'},
+                {'description': 'Tap replacement', 'quantity': '1', 'unit_price': '40.00'},
+            ],
+            'gst': True, 'valid_until': '2026-12-31',
+            'notes': 'Access to the property required.',
+            'terms': 'Payment due within 7 days.'
+        }
+        response = self.send(self.a, 'POST', f'/api/enquiries/{enquiry_id}/quote', quote_data)
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.json['subtotal'], '210.00')
+        self.assertEqual(response.json['gst'], '21.00')
+        self.assertEqual(response.json['total'], '231.00')
+        saved = self.a.get('/api/enquiries').json['entries'][0]
+        self.assertEqual(saved['status'], 'Quoted')
+        self.assertEqual(saved['amount'], '231.00')
+        pdf_path = response.json['pdf_url']
+        pdf = self.a.get(pdf_path)
+        self.assertEqual(pdf.status_code, 200)
+        self.assertEqual(pdf.mimetype, 'application/pdf')
+        self.assertTrue(pdf.data.startswith(b'%PDF-'))
+        self.assertEqual(self.b.get(pdf_path).status_code, 404)
+
+    def test_quote_validation_and_gst_exemption(self):
+        self.register(self.a)
+        enquiry_id = self.send(self.a, 'POST', '/api/enquiries', self.payload).json['id']
+        base = {'items': [{'description': 'Materials', 'quantity': '1', 'unit_price': '100.00'}], 'gst': False, 'valid_until': '2026-12-31'}
+        result = self.send(self.a, 'POST', f'/api/enquiries/{enquiry_id}/quote', base)
+        self.assertEqual(result.status_code, 201)
+        self.assertEqual(result.json['gst'], '0.00')
+        self.assertEqual(result.json['total'], '100.00')
+        invalid = dict(base, items=[{'description': 'Bad quantity', 'quantity': '-1', 'unit_price': '100'}])
+        self.assertEqual(self.send(self.a, 'POST', f'/api/enquiries/{enquiry_id}/quote', invalid).status_code, 400)
+        self.assertEqual(self.send(self.a, 'POST', '/api/enquiries/not-yours/quote', base).status_code, 404)
+
     def test_throttle(self):
         owner = self.register(self.a)
         path = '/api/public/' + owner['public_id']
