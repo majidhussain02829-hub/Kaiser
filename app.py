@@ -351,7 +351,43 @@ def create_app(database=None, testing=False):
         styles.add(ParagraphStyle(name='SmallMuted', parent=styles['Normal'], fontSize=8.5, leading=12, textColor=colors.HexColor('#66776d')))
         styles.add(ParagraphStyle(name='SectionQD', parent=styles['Heading2'], fontSize=10, leading=13, textColor=colors.HexColor('#174734'), spaceBefore=10, spaceAfter=5))
         styles.add(ParagraphStyle(name='RightQD', parent=styles['Normal'], fontSize=9, leading=13, alignment=TA_RIGHT))
-        money_fmt = lambda value: '    def public_info(public_id):
+        money_fmt = lambda value: chr(36) + format(Decimal(value), ',.2f')
+        story = [Paragraph(escape(row['business']), styles['Brand']),
+                 Paragraph(escape(row['business_email']), styles['SmallMuted']), Spacer(1, 12),
+                 Paragraph('QUOTE', styles['Heading1'])]
+        meta = [[Paragraph('<b>Quote number</b><br/>'+escape(row['quote_number']), styles['Normal']),
+                 Paragraph('<b>Issued</b><br/>'+escape(row['quote_date']), styles['Normal']),
+                 Paragraph('<b>Valid until</b><br/>'+escape(row['valid_until']), styles['Normal'])]]
+        meta_table = Table(meta, colWidths=[58*mm, 48*mm, 48*mm])
+        meta_table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#edf3ed')),('BOX',(0,0),(-1,-1),.5,colors.HexColor('#dce6dc')),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),9),('RIGHTPADDING',(0,0),(-1,-1),9),('TOPPADDING',(0,0),(-1,-1),9),('BOTTOMPADDING',(0,0),(-1,-1),9)]))
+        story += [meta_table, Paragraph('PREPARED FOR', styles['SectionQD']),
+                  Paragraph('<b>'+escape(row['customer_name'])+'</b><br/>'+escape(row['customer_email'] or '')+'<br/>'+escape(row['customer_phone'] or '')+'<br/>'+escape(row['suburb']), styles['Normal']),
+                  Paragraph('JOB DESCRIPTION', styles['SectionQD']), Paragraph(escape(row['job']).replace('\\n','<br/>'), styles['Normal']), Spacer(1, 12)]
+        data_rows = [[Paragraph('<b>Description</b>', styles['Normal']), Paragraph('<b>Qty</b>', styles['RightQD']), Paragraph('<b>Unit price</b>', styles['RightQD']), Paragraph('<b>Amount</b>', styles['RightQD'])]]
+        for item in json.loads(row['items_json']):
+            data_rows.append([Paragraph(escape(item['description']).replace('\\n','<br/>'), styles['Normal']),
+                              Paragraph(escape(item['quantity']), styles['RightQD']),
+                              Paragraph(money_fmt(item['unit_price']), styles['RightQD']),
+                              Paragraph(money_fmt(item['line_total']), styles['RightQD'])])
+        quote_table = Table(data_rows, colWidths=[83*mm, 18*mm, 34*mm, 34*mm], repeatRows=1)
+        quote_table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#174734')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),.35,colors.HexColor('#dfe7df')),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(1,0),(-1,-1),'RIGHT'),('LEFTPADDING',(0,0),(-1,-1),7),('RIGHTPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#f7f9f6')])]))
+        story += [quote_table, Spacer(1, 8)]
+        totals = [['Subtotal', money_fmt(row['subtotal'])], ['GST (10%)', money_fmt(row['gst'])], ['TOTAL (AUD)', money_fmt(row['total'])]]
+        total_table = Table(totals, colWidths=[42*mm, 35*mm], hAlign='RIGHT')
+        total_table.setStyle(TableStyle([('ALIGN',(1,0),(-1,-1),'RIGHT'),('FONTNAME',(0,0),(-1,-2),'Helvetica'),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold'),('FONTSIZE',(0,-1),(-1,-1),12),('TEXTCOLOR',(0,-1),(-1,-1),colors.HexColor('#174734')),('LINEABOVE',(0,-1),(-1,-1),1,colors.HexColor('#174734')),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]))
+        story += [total_table]
+        if row['notes'].strip():
+            story += [Paragraph('NOTES', styles['SectionQD']), Paragraph(escape(row['notes']).replace('\\n','<br/>'), styles['Normal'])]
+        if row['terms'].strip():
+            story += [Paragraph('TERMS &amp; CONDITIONS', styles['SectionQD']), Paragraph(escape(row['terms']).replace('\\n','<br/>'), styles['Normal'])]
+        story += [Spacer(1, 16), Paragraph('Thank you for the opportunity to quote on this work.', styles['SmallMuted'])]
+        doc.build(story)
+        buffer.seek(0)
+        return send_file(buffer, mimetype='application/pdf', as_attachment=True,
+                         download_name='Quote-'+row['quote_number']+'.pdf')
+
+    @app.get('/api/public/<public_id>')
+    def public_info(public_id):
         row = db().execute('SELECT business FROM users WHERE public_id=?', (public_id,)).fetchone()
         if not row:
             abort(404, description='This enquiry form is unavailable.')
@@ -389,42 +425,7 @@ if __name__ == '__main__':
     application = create_app()
     start_worker(application)
     serve(application, host=args.host, port=args.port, threads=4)
- + format(Decimal(value), ',.2f')
-        story = [Paragraph(escape(row['business']), styles['Brand']),
-                 Paragraph(escape(row['business_email']), styles['SmallMuted']), Spacer(1, 12),
-                 Paragraph('QUOTE', styles['Heading1'])]
-        meta = [[Paragraph('<b>Quote number</b><br/>'+escape(row['quote_number']), styles['Normal']),
-                 Paragraph('<b>Issued</b><br/>'+escape(row['quote_date']), styles['Normal']),
-                 Paragraph('<b>Valid until</b><br/>'+escape(row['valid_until']), styles['Normal'])]]
-        meta_table = Table(meta, colWidths=[58*mm, 48*mm, 48*mm])
-        meta_table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,-1),colors.HexColor('#edf3ed')),('BOX',(0,0),(-1,-1),.5,colors.HexColor('#dce6dc')),('VALIGN',(0,0),(-1,-1),'TOP'),('LEFTPADDING',(0,0),(-1,-1),9),('RIGHTPADDING',(0,0),(-1,-1),9),('TOPPADDING',(0,0),(-1,-1),9),('BOTTOMPADDING',(0,0),(-1,-1),9)]))
-        story += [meta_table, Paragraph('PREPARED FOR', styles['SectionQD']),
-                  Paragraph('<b>'+escape(row['customer_name'])+'</b><br/>'+escape(row['customer_email'] or '')+'<br/>'+escape(row['customer_phone'] or '')+'<br/>'+escape(row['suburb']), styles['Normal']),
-                  Paragraph('JOB DESCRIPTION', styles['SectionQD']), Paragraph(escape(row['job']).replace('\\n','<br/>'), styles['Normal']), Spacer(1, 12)]
-        data_rows = [[Paragraph('<b>Description</b>', styles['Normal']), Paragraph('<b>Qty</b>', styles['RightQD']), Paragraph('<b>Unit price</b>', styles['RightQD']), Paragraph('<b>Amount</b>', styles['RightQD'])]]
-        for item in json.loads(row['items_json']):
-            data_rows.append([Paragraph(escape(item['description']).replace('\\n','<br/>'), styles['Normal']),
-                              Paragraph(escape(item['quantity']), styles['RightQD']),
-                              Paragraph(money_fmt(item['unit_price']), styles['RightQD']),
-                              Paragraph(money_fmt(item['line_total']), styles['RightQD'])])
-        quote_table = Table(data_rows, colWidths=[83*mm, 18*mm, 34*mm, 34*mm], repeatRows=1)
-        quote_table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#174734')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),.35,colors.HexColor('#dfe7df')),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(1,0),(-1,-1),'RIGHT'),('LEFTPADDING',(0,0),(-1,-1),7),('RIGHTPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#f7f9f6')])]))
-        story += [quote_table, Spacer(1, 8)]
-        totals = [['Subtotal', money_fmt(row['subtotal'])], ['GST (10%)', money_fmt(row['gst'])], ['TOTAL (AUD)', money_fmt(row['total'])]]
-        total_table = Table(totals, colWidths=[42*mm, 35*mm], hAlign='RIGHT')
-        total_table.setStyle(TableStyle([('ALIGN',(1,0),(-1,-1),'RIGHT'),('FONTNAME',(0,0),(-1,-2),'Helvetica'),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold'),('FONTSIZE',(0,-1),(-1,-1),12),('TEXTCOLOR',(0,-1),(-1,-1),colors.HexColor('#174734')),('LINEABOVE',(0,-1),(-1,-1),1,colors.HexColor('#174734')),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]))
-        story += [total_table]
-        if row['notes'].strip():
-            story += [Paragraph('NOTES', styles['SectionQD']), Paragraph(escape(row['notes']).replace('\\n','<br/>'), styles['Normal'])]
-        if row['terms'].strip():
-            story += [Paragraph('TERMS &amp; CONDITIONS', styles['SectionQD']), Paragraph(escape(row['terms']).replace('\\n','<br/>'), styles['Normal'])]
-        story += [Spacer(1, 16), Paragraph('Thank you for the opportunity to quote on this work.', styles['SmallMuted'])]
-        doc.build(story)
-        buffer.seek(0)
-        return send_file(buffer, mimetype='application/pdf', as_attachment=True,
-                         download_name='Quote-'+row['quote_number']+'.pdf')
 
-    @app.get('/api/public/<public_id>')
     def public_info(public_id):
         row = db().execute('SELECT business FROM users WHERE public_id=?', (public_id,)).fetchone()
         if not row:
