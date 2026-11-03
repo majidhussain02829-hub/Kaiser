@@ -310,7 +310,7 @@ def create_app(database=None, testing=False):
                           'unit_price': str(unit_price.quantize(Decimal('.01'))), 'line_total': str(line_total)})
             subtotal += line_total
         subtotal = subtotal.quantize(Decimal('.01'))
-        gst_enabled = d.get('gst', True)
+        gst_enabled = d.get('gst', False)
         if not isinstance(gst_enabled, bool):
             abort(400, description='GST must be true or false.')
         gst = (subtotal * Decimal('.10')).quantize(Decimal('.01')) if gst_enabled else Decimal('0.00')
@@ -372,7 +372,7 @@ def create_app(database=None, testing=False):
         quote_table = Table(data_rows, colWidths=[83*mm, 18*mm, 34*mm, 34*mm], repeatRows=1)
         quote_table.setStyle(TableStyle([('BACKGROUND',(0,0),(-1,0),colors.HexColor('#174734')),('TEXTCOLOR',(0,0),(-1,0),colors.white),('GRID',(0,0),(-1,-1),.35,colors.HexColor('#dfe7df')),('VALIGN',(0,0),(-1,-1),'TOP'),('ALIGN',(1,0),(-1,-1),'RIGHT'),('LEFTPADDING',(0,0),(-1,-1),7),('RIGHTPADDING',(0,0),(-1,-1),7),('TOPPADDING',(0,0),(-1,-1),8),('BOTTOMPADDING',(0,0),(-1,-1),8),('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.white,colors.HexColor('#f7f9f6')])]))
         story += [quote_table, Spacer(1, 8)]
-        totals = [['Subtotal', money_fmt(row['subtotal'])], ['GST (10%)', money_fmt(row['gst'])], ['TOTAL (AUD)', money_fmt(row['total'])]]
+        totals = [['Subtotal', money_fmt(row['subtotal'])], ['GST (10%)' if Decimal(row['gst']) else 'GST not charged', money_fmt(row['gst'])], ['TOTAL (AUD)', money_fmt(row['total'])]]
         total_table = Table(totals, colWidths=[42*mm, 35*mm], hAlign='RIGHT')
         total_table.setStyle(TableStyle([('ALIGN',(1,0),(-1,-1),'RIGHT'),('FONTNAME',(0,0),(-1,-2),'Helvetica'),('FONTNAME',(0,-1),(-1,-1),'Helvetica-Bold'),('FONTSIZE',(0,-1),(-1,-1),12),('TEXTCOLOR',(0,-1),(-1,-1),colors.HexColor('#174734')),('LINEABOVE',(0,-1),(-1,-1),1,colors.HexColor('#174734')),('TOPPADDING',(0,0),(-1,-1),6),('BOTTOMPADDING',(0,0),(-1,-1),6)]))
         story += [total_table]
