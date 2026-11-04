@@ -30,7 +30,8 @@ ROOT = Path(__file__).resolve().parents[1]
 API_ORIGINS = {'https://www.pythonanywhere.com', 'https://eu.pythonanywhere.com'}
 PACKAGES = {'Flask': 'flask', 'Werkzeug': 'werkzeug', 'Jinja2': 'jinja2',
             'click': 'click', 'blinker': 'blinker', 'itsdangerous': 'itsdangerous',
-            'MarkupSafe': 'markupsafe', 'waitress': 'waitress'}
+            'MarkupSafe': 'markupsafe', 'waitress': 'waitress',
+            'reportlab': 'reportlab'}
 SOURCE_FILES = ('app.py', 'automations.py', 'scheduler.py', 'index.html')
 MARKER = '.quote-desk-deployment.json'
 

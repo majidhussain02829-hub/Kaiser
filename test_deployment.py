@@ -1,6 +1,8 @@
 """Exercise free-host WSGI setup without a hosting account or live API calls."""
 import json
 import os
+from io import BytesIO
+from zipfile import ZipFile
 from pathlib import Path
 import runpy
 import tempfile
@@ -45,6 +47,12 @@ class FreeHostingTests(unittest.TestCase):
         self.config.chmod(0o600)
         with self.assertRaisesRegex(RuntimeError, 'unsupported fields'):
             self.load()
+
+    def test_free_deployment_bundle_includes_pdf_renderer(self):
+        from deploy.pythonanywhere_api import PACKAGES, runtime_zip
+        self.assertEqual(PACKAGES['reportlab'], 'reportlab')
+        with ZipFile(BytesIO(runtime_zip())) as archive:
+            self.assertIn('reportlab/__init__.py', archive.namelist())
 
     def test_paid_blueprint_is_not_the_default(self):
         self.assertFalse((self.root / 'render.yaml').exists())
